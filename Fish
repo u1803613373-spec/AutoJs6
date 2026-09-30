@@ -1,0 +1,247 @@
+from pathlib import Path
+
+script = r'''auto();
+
+/*
+ * SLAYERS 2 — PÊCHE V2 — AUTO.JS
+ * Boucle automatique :
+ *   1. lance la canne
+ *   2. attend la jauge
+ *   3. maintient le marqueur dans la zone verte
+ *   4. attend la fin
+ *   5. relance
+ *
+ * Référence : vidéo fournie, résolution 1602x720.
+ *
+ * Si ton téléphone utilise une autre résolution, les coordonnées
+ * CAST_X / CAST_Y et la zone de jauge devront être recalibrées.
+ */
+
+const CFG = {
+    // Clic utilisé pour lancer/re-lancer la pêche.
+    // Dans ta vidéo, on vise la zone d'eau devant le personnage.
+    CAST_X: 1065,
+    CAST_Y: 475,
+
+    // Zone de la jauge verticale observée dans ta vidéo.
+    GAUGE_X1: 1168,
+    GAUGE_X2: 1235,
+    GAUGE_Y1: 105,
+    GAUGE_Y2: 515,
+
+    // Zone dans laquelle on cherche le marqueur blanc.
+    MARKER_X1: 1185,
+    MARKER_X2: 1218,
+    MARKER_Y1: 100,
+    MARKER_Y2: 515,
+
+    // Seuils de couleur.
+    GREEN_G: 125,
+    WHITE_RGB: 205,
+
+    // Contrôle du mini-jeu.
+    TARGET_TOLERANCE: 7,
+    PRESS_MS: 45,
+    CORRECTION_MS: 22,
+
+    // Timing entre les phases.
+    AFTER_CAST_MS: 650,
+    AFTER_CATCH_MS: 900,
+    NO_GAUGE_MS: 100,
+
+    // Protection contre les clics trop rapides.
+    MIN_CAST_INTERVAL_MS: 1800
+};
+
+let running = true;
+let lastCast = 0;
+let gaugeWasSeen = false;
+let fishPhase = false;
+
+// Bouton flottant STOP
+let stopWin = floaty.window(
+    <vertical bg="#AA000000" padding="5">
+        <button id="stop" text="STOP" textSize="13sp"/>
+    </vertical>
+);
+stopWin.setPosition(20, 100);
+
+stopWin.stop.click(() => {
+    running = false;
+    toast("Macro arrêtée");
+    try { stopWin.close(); } catch(e) {}
+    exit();
+});
+
+events.on("exit", () => {
+    running = false;
+    try { stopWin.close(); } catch(e) {}
+});
+
+if (!requestScreenCapture()) {
+    toast("Autorise la capture d'écran puis relance la macro.");
+    exit();
+}
+
+toast("Slayers 2 : macro pêche V2 activée");
+sleep(1000);
+
+function isGreen(c) {
+    let r = colors.red(c);
+    let g = colors.green(c);
+    let b = colors.blue(c);
+
+    return g >= CFG.GREEN_G &&
+           g > r * 1.35 &&
+           g > b * 1.15;
+}
+
+function isWhite(c) {
+    return colors.red(c) >= CFG.WHITE_RGB &&
+           colors.green(c) >= CFG.WHITE_RGB &&
+           colors.blue(c) >= CFG.WHITE_RGB;
+}
+
+/*
+ * Retourne le centre vertical de la zone verte.
+ */
+function findGreenCenter(img) {
+    let top = 99999;
+    let bottom = -1;
+
+    for (let y = CFG.GAUGE_Y1; y <= CFG.GAUGE_Y2; y += 2) {
+        let count = 0;
+
+        for (let x = CFG.GAUGE_X1; x <= CFG.GAUGE_X2; x += 3) {
+            if (isGreen(images.pixel(img, x, y))) count++;
+        }
+
+        if (count >= 3) {
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+        }
+    }
+
+    if (bottom < 0) return null;
+    return (top + bottom) / 2;
+}
+
+/*
+ * Retourne le centre vertical du marqueur blanc.
+ */
+function findMarker(img) {
+    let top = 99999;
+    let bottom = -1;
+
+    for (let y = CFG.MARKER_Y1; y <= CFG.MARKER_Y2; y++) {
+        let count = 0;
+
+        for (let x = CFG.MARKER_X1; x <= CFG.MARKER_X2; x += 2) {
+            if (isWhite(images.pixel(img, x, y))) count++;
+        }
+
+        if (count >= 2) {
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+        }
+    }
+
+    if (bottom < 0) return null;
+    return (top + bottom) / 2;
+}
+
+function castRod() {
+    let now = Date.now();
+
+    if (now - lastCast < CFG.MIN_CAST_INTERVAL_MS) {
+        sleep(CFG.MIN_CAST_INTERVAL_MS - (now - lastCast));
+    }
+
+    click(CFG.CAST_X, CFG.CAST_Y);
+    lastCast = Date.now();
+    gaugeWasSeen = false;
+    fishPhase = true;
+
+    sleep(CFG.AFTER_CAST_MS);
+}
+
+function releaseImage(img) {
+    try {
+        if (img) img.recycle();
+    } catch(e) {}
+}
+
+/*
+ * État initial : lancer la canne.
+ */
+castRod();
+
+while (running) {
+    let img = null;
+
+    try {
+        img = captureScreen();
+
+        let greenCenter = findGreenCenter(img);
+        let marker = findMarker(img);
+
+        if (greenCenter !== null && marker !== null) {
+            // La jauge est active.
+            gaugeWasSeen = true;
+
+            let low = greenCenter + CFG.TARGET_TOLERANCE;
+            let high = greenCenter - CFG.TARGET_TOLERANCE;
+
+            if (marker > low) {
+                // Marqueur trop bas : appui pour le faire remonter.
+                press(CFG.CAST_X, CFG.CAST_Y, CFG.PRESS_MS);
+
+            } else if (marker < high) {
+                // Marqueur trop haut : laisser redescendre.
+                sleep(28);
+
+            } else {
+                // Marqueur dans la zone : correction très légère.
+                press(CFG.CAST_X, CFG.CAST_Y, CFG.CORRECTION_MS);
+            }
+
+            fishPhase = true;
+
+        } else if (gaugeWasSeen) {
+            /*
+             * La jauge existait puis a disparu :
+             * on considère le poisson récupéré / la séquence terminée.
+             */
+            releaseImage(img);
+            img = null;
+
+            sleep(CFG.AFTER_CATCH_MS);
+
+            if (running) {
+                castRod();
+            }
+
+        } else {
+            /*
+             * Après un lancer, la jauge peut mettre un petit moment
+             * à apparaître.
+             */
+            sleep(CFG.NO_GAUGE_MS);
+        }
+
+        releaseImage(img);
+        img = null;
+
+    } catch(e) {
+        releaseImage(img);
+        img = null;
+        sleep(120);
+    }
+}
+
+toast("Macro pêche V2 arrêtée.");
+'''
+
+path = Path("/mnt/data/Slayers2_Peche_V2_AutoJS.js")
+path.write_text(script, encoding="utf-8")
+print(path
